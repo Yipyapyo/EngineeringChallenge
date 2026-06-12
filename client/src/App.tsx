@@ -17,26 +17,34 @@ const swrOptions = {
   revalidateOnReconnect: false,
 };
 
+// All AI chat state for one (document, version) pair. Keeping these together
+// lets each version of each document carry its own independent chat, pending
+// edit, and diff base.
+interface ChatSession {
+  messages: ChatMessage[];
+  pendingAIContent: string | null;
+  aiBaseContent: string | null;
+}
+
+const EMPTY_SESSION: ChatSession = { messages: [], pendingAIContent: null, aiBaseContent: null };
+
 function App() {
   const [currentDocumentId, setCurrentDocumentId] = useState<number>(1);
-  const [chatMessagesByDoc, setChatMessagesByDoc] = useState<Record<number, ChatMessage[]>>({});
-  const chatMessages = chatMessagesByDoc[currentDocumentId] ?? [];
-
-  const setChatMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
-    setChatMessagesByDoc((prev) => {
-      const current = prev[currentDocumentId] ?? [];
-      const next = typeof updater === "function" ? updater(current) : updater;
-      return { ...prev, [currentDocumentId]: next };
-    });
-  };
-
-  const [pendingAIContent, setPendingAIContent] = useState<string | null>(null);
-  const [aiBaseContent, setAIBaseContent] = useState<string | null>(null);
+  // Chat sessions keyed by "documentId:versionId"
+  const [sessions, setSessions] = useState<Record<string, ChatSession>>({});
+  // Session keys with an AI request currently processing
+  const [aiLoadingKeys, setAILoadingKeys] = useState<ReadonlySet<string>>(new Set());
+  const [editorModified, setEditorModified] = useState<boolean>(false);
   const [isMutating, setIsMutating] = useState<boolean>(false);
-  const [isAILoading, setIsAILoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const editor = useEditor({ extensions: [StarterKit] });
+  // The TipTap editor is the single source of truth for document content.
+  // onUpdate only fires for user edits — programmatic setContent calls don't
+  // emit updates, so loading a document or switching versions stays clean.
+  const editor = useEditor({
+    extensions: [StarterKit],
+    onUpdate: () => setEditorModified(true),
+  });
 
   const {
     data: docData,
@@ -55,13 +63,20 @@ function App() {
   const activeVersionId = docData?.current_version_id ?? null;
   const isLoading = isDocLoading || isVersionsLoading || isMutating;
 
+  const sessionKey = `${currentDocumentId}:${activeVersionId ?? "loading"}`;
+  const session = sessions[sessionKey] ?? EMPTY_SESSION;
+  const isAILoading = aiLoadingKeys.has(sessionKey);
+
+  const updateSession = (key: string, updater: (prev: ChatSession) => ChatSession) => {
+    setSessions((prev) => ({ ...prev, [key]: updater(prev[key] ?? EMPTY_SESSION) }));
+  };
+
   const documentIdRef = useRef<number | null>(null);
   useEffect(() => {
     if (editor && docData && documentIdRef.current !== currentDocumentId) {
       documentIdRef.current = currentDocumentId;
       editor.commands.setContent(docData.content);
-      setPendingAIContent(null);
-      setAIBaseContent(null);
+      setEditorModified(false);
     }
   }, [editor, docData, currentDocumentId]);
 
@@ -84,6 +99,7 @@ function App() {
     try {
       await api.saveDocument(currentDocumentId, content);
       mutateDocument((prev) => prev && { ...prev, content }, { revalidate: false });
+      setEditorModified(false);
     } catch (err) {
       setErrorMessage(err instanceof APIError ? err.message : "Failed to save.");
     } finally {
@@ -102,6 +118,7 @@ function App() {
         (prev) => prev && { ...prev, content, current_version_id: newVersion.id },
         { revalidate: false },
       );
+      setEditorModified(false);
     } catch (err) {
       setErrorMessage(err instanceof APIError ? err.message : "Failed to create version.");
     } finally {
@@ -116,6 +133,7 @@ function App() {
       const updatedDoc = await api.activateVersion(currentDocumentId, versionId);
       mutateDocument(updatedDoc, { revalidate: false });
       editor.commands.setContent(updatedDoc.content);
+      setEditorModified(false);
     } catch (err) {
       setErrorMessage(err instanceof APIError ? err.message : "Failed to switch version.");
     } finally {
@@ -124,16 +142,20 @@ function App() {
   };
 
   const handleAIEdit = async (instruction: string, file?: File) => {
-    if (!editor) return;
+    if (!editor || activeVersionId === null) return;
+    const key = sessionKey;
     const baseContent = editor.getHTML();
 
     const userMessages: ChatMessage[] = [{ role: "user", content: instruction }];
     if (file) {
       userMessages.push({ role: "user", content: `[File: ${file.name}]` });
     }
-    setChatMessages((prev) => [...prev, ...userMessages]);
-    setAIBaseContent(baseContent);
-    setIsAILoading(true);
+    updateSession(key, (s) => ({
+      ...s,
+      aiBaseContent: baseContent,
+      messages: [...s.messages, ...userMessages],
+    }));
+    setAILoadingKeys((prev) => new Set(prev).add(key));
 
     try {
       const contextFileContent = file ? await file.text() : undefined;
@@ -144,35 +166,53 @@ function App() {
         contextFileContent,
       );
       // Store as pending — don't apply to the editor until the user confirms.
-      setPendingAIContent(result.updated_html);
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Edit ready. Review and click Apply to update the document, or Discard to cancel.",
-        },
-      ]);
+      const readyMessage: ChatMessage = {
+        role: "assistant",
+        content: "Edit ready. Review and click Apply to update the document, or Discard to cancel.",
+      };
+      updateSession(key, (s) => ({
+        ...s,
+        pendingAIContent: result.updated_html,
+        messages: [...s.messages, readyMessage],
+      }));
     } catch (err) {
-      const message = err instanceof APIError ? err.message : "AI edit failed.";
-      setChatMessages((prev) => [...prev, { role: "error", content: message }]);
-      setAIBaseContent(null);
+      const errorChat: ChatMessage = {
+        role: "error",
+        content: err instanceof APIError ? err.message : "AI edit failed.",
+      };
+      updateSession(key, (s) => ({
+        ...s,
+        aiBaseContent: null,
+        messages: [...s.messages, errorChat],
+      }));
     } finally {
-      setIsAILoading(false);
+      setAILoadingKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
     }
   };
 
   const handleApplyAIChange = () => {
-    if (!editor || !pendingAIContent) return;
-    editor.commands.setContent(pendingAIContent);
-    setPendingAIContent(null);
-    setAIBaseContent(null);
-    setChatMessages((prev) => [...prev, { role: "assistant", content: "Applied." }]);
+    if (!editor || !session.pendingAIContent) return;
+    editor.commands.setContent(session.pendingAIContent);
+    setEditorModified(true);
+    updateSession(sessionKey, (s) => ({
+      ...s,
+      pendingAIContent: null,
+      aiBaseContent: null,
+      messages: [...s.messages, { role: "assistant", content: "Applied." } as ChatMessage],
+    }));
   };
 
   const handleDiscardAIChange = () => {
-    setPendingAIContent(null);
-    setAIBaseContent(null);
-    setChatMessages((prev) => [...prev, { role: "assistant", content: "Discarded." }]);
+    updateSession(sessionKey, (s) => ({
+      ...s,
+      pendingAIContent: null,
+      aiBaseContent: null,
+      messages: [...s.messages, { role: "assistant", content: "Discarded." } as ChatMessage],
+    }));
   };
 
   return (
@@ -234,6 +274,7 @@ function App() {
           onSave={savePatent}
           onCreateVersion={handleCreateVersion}
           isLoading={isLoading}
+          editorModified={editorModified}
         />
 
         <div
@@ -263,10 +304,10 @@ function App() {
         </div>
 
         <ChatPanel
-          messages={chatMessages}
+          messages={session.messages}
           isLoading={isAILoading}
-          aiBaseContent={aiBaseContent}
-          pendingAIContent={pendingAIContent}
+          aiBaseContent={session.aiBaseContent}
+          pendingAIContent={session.pendingAIContent}
           onSubmit={handleAIEdit}
           onApplyChange={handleApplyAIChange}
           onDiscardChange={handleDiscardAIChange}

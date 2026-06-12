@@ -9,6 +9,7 @@ interface VersionPanelProps {
   onSave: () => void;
   onCreateVersion: () => void;
   isLoading: boolean;
+  editorModified: boolean;
 }
 
 export default function VersionPanel({
@@ -20,6 +21,7 @@ export default function VersionPanel({
   onSave,
   onCreateVersion,
   isLoading,
+  editorModified,
 }: VersionPanelProps) {
   return (
     <div className="flex flex-col gap-4 px-4 py-2 w-44 flex-shrink-0 border-r">
@@ -72,8 +74,21 @@ export default function VersionPanel({
           </div>
 
           <div className="flex flex-col gap-2 border-t pt-4">
-            <button onClick={onSave} disabled={isLoading}>
-              Save
+            <button
+              onClick={onSave}
+              disabled={isLoading || !editorModified}
+              style={
+                editorModified
+                  ? {
+                      background: "#f59e0b",
+                      color: "white",
+                      fontWeight: 600,
+                      boxShadow: "0 0 0 2px #fde68a",
+                    }
+                  : undefined
+              }
+            >
+              {editorModified ? "Save •" : "Save"}
             </button>
             <button onClick={onCreateVersion} disabled={isLoading}>
               New Version
