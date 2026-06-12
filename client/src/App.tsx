@@ -1,73 +1,276 @@
+import { useEffect, useRef, useState } from "react";
+import { useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import useSWR from "swr";
+
+import { APIError, api } from "./api";
+import ChatPanel, { ChatMessage } from "./ChatPanel";
 import Document from "./Document";
-import { useEffect, useState } from "react";
-import axios from "axios";
 import LoadingOverlay from "./LoadingOverlay";
+import VersionPanel from "./VersionPanel";
 import Logo from "./assets/logo.png";
 
-
-const BACKEND_URL = "http://localhost:8000";
+// useSWR to cache patent document versions
+const swrOptions = {
+  revalidateOnFocus: false,
+  revalidateIfStale: false,
+  revalidateOnReconnect: false,
+};
 
 function App() {
-  const [currentDocumentContent, setCurrentDocumentContent] =
-    useState<string>("");
-  const [currentDocumentId, setCurrentDocumentId] = useState<number>(0);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [currentDocumentId, setCurrentDocumentId] = useState<number>(1);
+  const [chatMessagesByDoc, setChatMessagesByDoc] = useState<Record<number, ChatMessage[]>>({});
+  const chatMessages = chatMessagesByDoc[currentDocumentId] ?? [];
 
-  // Load the first patent on mount
-  useEffect(() => {
-    loadPatent(1);
-  }, []);
-
-  // Callback to load a patent from the backend
-  const loadPatent = async (documentNumber: number) => {
-    setIsLoading(true);
-    console.log("Loading patent:", documentNumber);
-    try {
-      const response = await axios.get(
-        `${BACKEND_URL}/document/${documentNumber}`
-      );
-      setCurrentDocumentContent(response.data.content);
-      setCurrentDocumentId(documentNumber);
-    } catch (error) {
-      console.error("Error loading document:", error);
-    }
-    setIsLoading(false);
+  const setChatMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
+    setChatMessagesByDoc((prev) => {
+      const current = prev[currentDocumentId] ?? [];
+      const next = typeof updater === "function" ? updater(current) : updater;
+      return { ...prev, [currentDocumentId]: next };
+    });
   };
 
-  // Callback to persist a patent in the DB
-  const savePatent = async (documentNumber: number) => {
-    setIsLoading(true);
-    try {
-      await axios.post(`${BACKEND_URL}/save/${documentNumber}`, {
-        content: currentDocumentContent,
-      });
-    } catch (error) {
-      console.error("Error saving document:", error);
+  const [pendingAIContent, setPendingAIContent] = useState<string | null>(null);
+  const [aiBaseContent, setAIBaseContent] = useState<string | null>(null);
+  const [isMutating, setIsMutating] = useState<boolean>(false);
+  const [isAILoading, setIsAILoading] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const editor = useEditor({ extensions: [StarterKit] });
+
+  const {
+    data: docData,
+    error: docError,
+    isLoading: isDocLoading,
+    mutate: mutateDocument,
+  } = useSWR(["document", currentDocumentId], ([, id]) => api.getDocument(id), swrOptions);
+
+  const {
+    data: versions,
+    error: versionsError,
+    isLoading: isVersionsLoading,
+    mutate: mutateVersions,
+  } = useSWR(["versions", currentDocumentId], ([, id]) => api.getAllVersions(id), swrOptions);
+
+  const activeVersionId = docData?.current_version_id ?? null;
+  const isLoading = isDocLoading || isVersionsLoading || isMutating;
+
+  const documentIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (editor && docData && documentIdRef.current !== currentDocumentId) {
+      documentIdRef.current = currentDocumentId;
+      editor.commands.setContent(docData.content);
+      setPendingAIContent(null);
+      setAIBaseContent(null);
     }
-    setIsLoading(false);
+  }, [editor, docData, currentDocumentId]);
+
+  useEffect(() => {
+    const err = docError ?? versionsError;
+    if (err) {
+      setErrorMessage(err instanceof APIError ? err.message : "Failed to load document.");
+    }
+  }, [docError, versionsError]);
+
+  const loadPatent = (documentId: number) => {
+    if (documentId === currentDocumentId) return;
+    setCurrentDocumentId(documentId);
+  };
+
+  const savePatent = async () => {
+    if (!editor) return;
+    const content = editor.getHTML();
+    setIsMutating(true);
+    try {
+      await api.saveDocument(currentDocumentId, content);
+      mutateDocument((prev) => prev && { ...prev, content }, { revalidate: false });
+    } catch (err) {
+      setErrorMessage(err instanceof APIError ? err.message : "Failed to save.");
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleCreateVersion = async () => {
+    if (!editor) return;
+    const content = editor.getHTML();
+    setIsMutating(true);
+    try {
+      const newVersion = await api.createVersion(currentDocumentId, content);
+      mutateVersions((prev) => [...(prev ?? []), newVersion], { revalidate: false });
+      mutateDocument(
+        (prev) => prev && { ...prev, content, current_version_id: newVersion.id },
+        { revalidate: false },
+      );
+    } catch (err) {
+      setErrorMessage(err instanceof APIError ? err.message : "Failed to create version.");
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleActivateVersion = async (versionId: number) => {
+    if (!editor || versionId === activeVersionId) return;
+    setIsMutating(true);
+    try {
+      const updatedDoc = await api.activateVersion(currentDocumentId, versionId);
+      mutateDocument(updatedDoc, { revalidate: false });
+      editor.commands.setContent(updatedDoc.content);
+    } catch (err) {
+      setErrorMessage(err instanceof APIError ? err.message : "Failed to switch version.");
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const handleAIEdit = async (instruction: string, file?: File) => {
+    if (!editor) return;
+    const baseContent = editor.getHTML();
+
+    const userMessages: ChatMessage[] = [{ role: "user", content: instruction }];
+    if (file) {
+      userMessages.push({ role: "user", content: `[File: ${file.name}]` });
+    }
+    setChatMessages((prev) => [...prev, ...userMessages]);
+    setAIBaseContent(baseContent);
+    setIsAILoading(true);
+
+    try {
+      const contextFileContent = file ? await file.text() : undefined;
+      const result = await api.aiEdit(
+        currentDocumentId,
+        baseContent,
+        instruction,
+        contextFileContent,
+      );
+      // Store as pending — don't apply to the editor until the user confirms.
+      setPendingAIContent(result.updated_html);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Edit ready. Review and click Apply to update the document, or Discard to cancel.",
+        },
+      ]);
+    } catch (err) {
+      const message = err instanceof APIError ? err.message : "AI edit failed.";
+      setChatMessages((prev) => [...prev, { role: "error", content: message }]);
+      setAIBaseContent(null);
+    } finally {
+      setIsAILoading(false);
+    }
+  };
+
+  const handleApplyAIChange = () => {
+    if (!editor || !pendingAIContent) return;
+    editor.commands.setContent(pendingAIContent);
+    setPendingAIContent(null);
+    setAIBaseContent(null);
+    setChatMessages((prev) => [...prev, { role: "assistant", content: "Applied." }]);
+  };
+
+  const handleDiscardAIChange = () => {
+    setPendingAIContent(null);
+    setAIBaseContent(null);
+    setChatMessages((prev) => [...prev, { role: "assistant", content: "Discarded." }]);
   };
 
   return (
-    <div className="flex flex-col h-full w-full">
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100%" }}>
       {isLoading && <LoadingOverlay />}
-      <header className="flex items-center justify-center top-0 w-full bg-black text-white text-center z-50 mb-[30px] h-[80px]">
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: "100%",
+          background: "black",
+          height: "80px",
+          flexShrink: 0,
+          marginBottom: "30px",
+        }}
+      >
         <img src={Logo} alt="Logo" style={{ height: "50px" }} />
       </header>
-      <div className="flex w-full bg-white h=[calc(100%-100px) gap-4 justify-center box-shadow">
-        <div className="flex flex-col h-full items-center gap-2 px-4">
-          <button onClick={() => loadPatent(1)}>Patent 1</button>
-          <button onClick={() => loadPatent(2)}>Patent 2</button>
+
+      {errorMessage && (
+        <div
+          style={{
+            background: "#fef2f2",
+            color: "#b91c1c",
+            padding: "8px 16px",
+            fontSize: "0.875rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexShrink: 0,
+          }}
+        >
+          {errorMessage}
+          <button
+            onClick={() => setErrorMessage(null)}
+            style={{ background: "none", border: "none", cursor: "pointer", fontWeight: "bold" }}
+          >
+            ×
+          </button>
         </div>
-        <div className="flex flex-col h-full items-center gap-2 px-4 flex-1">
-          <h2 className="self-start text-[#213547] opacity-60 text-2xl font-semibold">{`Patent ${currentDocumentId}`}</h2>
-          <Document
-            onContentChange={setCurrentDocumentContent}
-            content={currentDocumentContent}
-          />
+      )}
+
+      <div
+        style={{
+          display: "flex",
+          flex: 1,
+          minHeight: 0,
+          width: "100%",
+          background: "white",
+        }}
+      >
+        <VersionPanel
+          documentId={currentDocumentId}
+          versions={versions ?? []}
+          activeVersionId={activeVersionId}
+          onLoadPatent={loadPatent}
+          onActivateVersion={handleActivateVersion}
+          onSave={savePatent}
+          onCreateVersion={handleCreateVersion}
+          isLoading={isLoading}
+        />
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            flex: 1,
+            minWidth: 0,
+            alignItems: "center",
+            gap: "8px",
+            padding: "8px 16px",
+          }}
+        >
+          <h2
+            style={{
+              alignSelf: "flex-start",
+              color: "#213547",
+              opacity: 0.6,
+              fontSize: "1.5rem",
+              fontWeight: 600,
+              margin: 0,
+            }}
+          >
+            {currentDocumentId > 0 ? `Patent ${currentDocumentId}` : ""}
+          </h2>
+          <Document editor={editor} />
         </div>
-        <div className="flex flex-col h-full items-center gap-2 px-4">
-          <button onClick={() => savePatent(currentDocumentId)}>Save</button>
-        </div>
+
+        <ChatPanel
+          messages={chatMessages}
+          isLoading={isAILoading}
+          aiBaseContent={aiBaseContent}
+          pendingAIContent={pendingAIContent}
+          onSubmit={handleAIEdit}
+          onApplyChange={handleApplyAIChange}
+          onDiscardChange={handleDiscardAIChange}
+        />
       </div>
     </div>
   );

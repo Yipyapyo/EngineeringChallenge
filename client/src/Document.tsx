@@ -1,14 +1,13 @@
-import Editor from "./Editor";
+import { Editor, EditorContent } from "@tiptap/react";
 
 export interface DocumentProps {
-  onContentChange: (content: string) => void;
-  content: string;
+  editor: Editor | null;
 }
 
-export default function Document({ onContentChange, content }: DocumentProps) {
+export default function Document({ editor }: DocumentProps) {
   return (
     <div className="w-full h-full overflow-y-auto">
-      <Editor handleEditorChange={onContentChange} content={content} />
+      <EditorContent editor={editor} />
     </div>
   );
 }
