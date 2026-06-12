@@ -10,7 +10,7 @@ import LoadingOverlay from "./LoadingOverlay";
 import VersionPanel from "./VersionPanel";
 import Logo from "./assets/logo.png";
 
-// useSWR to cache patent document versions
+// useSWR to cache get patent document versions
 const swrOptions = {
   revalidateOnFocus: false,
   revalidateIfStale: false,
@@ -38,9 +38,6 @@ function App() {
   const [isMutating, setIsMutating] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // The TipTap editor is the single source of truth for document content.
-  // onUpdate only fires for user edits — programmatic setContent calls don't
-  // emit updates, so loading a document or switching versions stays clean.
   const editor = useEditor({
     extensions: [StarterKit],
     onUpdate: () => setEditorModified(true),
