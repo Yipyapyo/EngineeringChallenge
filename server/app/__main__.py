@@ -20,14 +20,13 @@ async def lifespan(_: FastAPI):
             doc = models.Document()
             db.add(doc)
             db.flush()
-            version = models.DocumentVersion(
-                document_id=doc.id,
-                version_number=1,
-                content=content,
+            db.add(
+                models.DocumentVersion(
+                    document_id=doc.id,
+                    version_number=1,
+                    content=content,
+                )
             )
-            db.add(version)
-            db.flush()
-            doc.current_version_id = version.id
         db.commit()
     yield
 
@@ -66,26 +65,35 @@ def _get_version(document_id: int, version_id: int, db: Session) -> models.Docum
     return version
 
 
+def _get_latest_version(document_id: int, db: Session) -> models.DocumentVersion:
+    version = db.scalar(
+        select(models.DocumentVersion)
+        .where(models.DocumentVersion.document_id == document_id)
+        .order_by(models.DocumentVersion.version_number.desc())
+        .limit(1)
+    )
+    if version is None:
+        raise HTTPException(status_code=404, detail="Document has no versions")
+    return version
+
+
 # --- Document endpoints ---
 
 @app.get("/document/{document_id}")
 def get_document(document_id: int, db: Session = Depends(get_db)) -> schemas.DocumentRead:
-    doc = _get_document(document_id, db)
-    if doc.current_version is None:
-        raise HTTPException(status_code=404, detail="Document has no versions")
-    return schemas.DocumentRead(
-        id=doc.id,
-        content=doc.current_version.content,
-        current_version_id=doc.current_version_id,
-    )
+    """Get a document's latest version content."""
+    _get_document(document_id, db)
+    latest = _get_latest_version(document_id, db)
+    return schemas.DocumentRead(id=document_id, content=latest.content, version_id=latest.id)
 
 
 @app.post("/save/{document_id}")
 def save(document_id: int, document: schemas.DocumentBase, db: Session = Depends(get_db)):
-    doc = _get_document(document_id, db)
-    if doc.current_version is None:
-        raise HTTPException(status_code=404, detail="Document has no active version")
-    doc.current_version.content = document.content
+    """Save to the document's latest version. Kept for backward compatibility;
+    prefer PUT /document/{id}/versions/{version_id} which targets an explicit version."""
+    _get_document(document_id, db)
+    latest = _get_latest_version(document_id, db)
+    latest.content = document.content
     db.commit()
     return {"document_id": document_id, "content": document.content}
 
@@ -109,7 +117,23 @@ def list_versions(
 def get_version(
     document_id: int, version_id: int, db: Session = Depends(get_db)
 ) -> schemas.VersionReadWithContent:
+    """Read a specific version's content."""
     return _get_version(document_id, version_id, db)
+
+
+@app.put("/document/{document_id}/versions/{version_id}")
+def update_version(
+    document_id: int,
+    version_id: int,
+    document: schemas.DocumentBase,
+    db: Session = Depends(get_db),
+) -> schemas.VersionReadWithContent:
+    """Update the content of a specific version, without creating a new one."""
+    version = _get_version(document_id, version_id, db)
+    version.content = document.content
+    db.commit()
+    db.refresh(version)
+    return version
 
 
 @app.post("/document/{document_id}/versions")
@@ -118,7 +142,7 @@ def create_version(
     document: schemas.DocumentBase,
     db: Session = Depends(get_db),
 ) -> schemas.VersionReadWithContent:
-    doc = _get_document(document_id, db)
+    _get_document(document_id, db)
     max_number = db.scalar(
         select(func.max(models.DocumentVersion.version_number)).where(
             models.DocumentVersion.document_id == document_id
@@ -130,26 +154,9 @@ def create_version(
         content=document.content,
     )
     db.add(new_version)
-    db.flush()
-    doc.current_version_id = new_version.id
     db.commit()
     db.refresh(new_version)
     return new_version
-
-
-@app.put("/document/{document_id}/versions/{version_id}/activate")
-def activate_version(
-    document_id: int, version_id: int, db: Session = Depends(get_db)
-) -> schemas.DocumentRead:
-    version = _get_version(document_id, version_id, db)
-    doc = _get_document(document_id, db)
-    doc.current_version_id = version_id
-    db.commit()
-    return schemas.DocumentRead(
-        id=doc.id,
-        content=version.content,
-        current_version_id=version_id,
-    )
 
 
 # --- AI editing endpoint ---

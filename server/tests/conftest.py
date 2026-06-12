@@ -28,14 +28,13 @@ def db():
         doc = models.Document()
         session.add(doc)
         session.flush()
-        version = models.DocumentVersion(
-            document_id=doc.id,
-            version_number=1,
-            content=content,
+        session.add(
+            models.DocumentVersion(
+                document_id=doc.id,
+                version_number=1,
+                content=content,
+            )
         )
-        session.add(version)
-        session.flush()
-        doc.current_version_id = version.id
     session.commit()
 
     yield session

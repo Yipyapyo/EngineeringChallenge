@@ -5,7 +5,7 @@ interface VersionPanelProps {
   versions: VersionRead[];
   activeVersionId: number | null;
   onLoadPatent: (id: number) => void;
-  onActivateVersion: (versionId: number) => void;
+  onSelectVersion: (versionId: number) => void;
   onSave: () => void;
   onCreateVersion: () => void;
   isLoading: boolean;
@@ -17,7 +17,7 @@ export default function VersionPanel({
   versions,
   activeVersionId,
   onLoadPatent,
-  onActivateVersion,
+  onSelectVersion,
   onSave,
   onCreateVersion,
   isLoading,
@@ -47,7 +47,7 @@ export default function VersionPanel({
               {versions.map((v) => (
                 <button
                   key={v.id}
-                  onClick={() => onActivateVersion(v.id)}
+                  onClick={() => onSelectVersion(v.id)}
                   disabled={isLoading}
                   style={{
                     textAlign: "left",

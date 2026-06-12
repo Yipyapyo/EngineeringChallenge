@@ -60,7 +60,7 @@ function App() {
     mutate: mutateVersions,
   } = useSWR(["versions", currentDocumentId], ([, id]) => api.getAllVersions(id), swrOptions);
 
-  const activeVersionId = docData?.current_version_id ?? null;
+  const [activeVersionId, setActiveVersionId] = useState<number | null>(null);
   const isLoading = isDocLoading || isVersionsLoading || isMutating;
 
   const sessionKey = `${currentDocumentId}:${activeVersionId ?? "loading"}`;
@@ -76,6 +76,7 @@ function App() {
     if (editor && docData && documentIdRef.current !== currentDocumentId) {
       documentIdRef.current = currentDocumentId;
       editor.commands.setContent(docData.content);
+      setActiveVersionId(docData.version_id);
       setEditorModified(false);
     }
   }, [editor, docData, currentDocumentId]);
@@ -93,12 +94,15 @@ function App() {
   };
 
   const savePatent = async () => {
-    if (!editor) return;
+    if (!editor || activeVersionId === null) return;
     const content = editor.getHTML();
     setIsMutating(true);
     try {
-      await api.saveDocument(currentDocumentId, content);
-      mutateDocument((prev) => prev && { ...prev, content }, { revalidate: false });
+      await api.saveVersion(currentDocumentId, activeVersionId, content);
+      mutateDocument(
+        (prev) => (prev && prev.version_id === activeVersionId ? { ...prev, content } : prev),
+        { revalidate: false },
+      );
       setEditorModified(false);
     } catch (err) {
       setErrorMessage(err instanceof APIError ? err.message : "Failed to save.");
@@ -115,9 +119,10 @@ function App() {
       const newVersion = await api.createVersion(currentDocumentId, content);
       mutateVersions((prev) => [...(prev ?? []), newVersion], { revalidate: false });
       mutateDocument(
-        (prev) => prev && { ...prev, content, current_version_id: newVersion.id },
+        (prev) => prev && { ...prev, content, version_id: newVersion.id },
         { revalidate: false },
       );
+      setActiveVersionId(newVersion.id);
       setEditorModified(false);
     } catch (err) {
       setErrorMessage(err instanceof APIError ? err.message : "Failed to create version.");
@@ -126,13 +131,13 @@ function App() {
     }
   };
 
-  const handleActivateVersion = async (versionId: number) => {
+  const handleSelectVersion = async (versionId: number) => {
     if (!editor || versionId === activeVersionId) return;
     setIsMutating(true);
     try {
-      const updatedDoc = await api.activateVersion(currentDocumentId, versionId);
-      mutateDocument(updatedDoc, { revalidate: false });
-      editor.commands.setContent(updatedDoc.content);
+      const version = await api.getVersion(currentDocumentId, versionId);
+      editor.commands.setContent(version.content);
+      setActiveVersionId(versionId);
       setEditorModified(false);
     } catch (err) {
       setErrorMessage(err instanceof APIError ? err.message : "Failed to switch version.");
@@ -270,7 +275,7 @@ function App() {
           versions={versions ?? []}
           activeVersionId={activeVersionId}
           onLoadPatent={loadPatent}
-          onActivateVersion={handleActivateVersion}
+          onSelectVersion={handleSelectVersion}
           onSave={savePatent}
           onCreateVersion={handleCreateVersion}
           isLoading={isLoading}

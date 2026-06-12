@@ -7,7 +7,7 @@ def test_get_document_returns_content(client):
     data = response.json()
     assert data["id"] == 1
     assert data["content"] == DOCUMENT_1
-    assert data["current_version_id"] is not None
+    assert data["version_id"] is not None
 
 
 def test_get_document_404(client):

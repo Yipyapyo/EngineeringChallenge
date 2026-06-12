@@ -11,7 +11,7 @@ class DocumentBase(BaseModel):
 class DocumentRead(BaseModel):
     id: int
     content: str
-    current_version_id: Optional[int] = None
+    version_id: int
 
 
 class VersionRead(BaseModel):

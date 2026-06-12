@@ -5,7 +5,7 @@ const BASE_URL = "http://localhost:8000";
 export interface DocumentRead {
   id: number;
   content: string;
-  current_version_id: number | null;
+  version_id: number;
 }
 
 export interface VersionRead {
@@ -54,8 +54,18 @@ export const api = {
   getDocument: (id: number): Promise<DocumentRead> =>
     request(() => http.get<DocumentRead>(`/document/${id}`).then((r) => r.data), "Failed to load document"),
 
-  saveDocument: (id: number, content: string): Promise<void> =>
-    request(() => http.post(`/save/${id}`, { content }).then(() => undefined), "Failed to save document"),
+  saveVersion: (
+    documentId: number,
+    versionId: number,
+    content: string,
+  ): Promise<VersionReadWithContent> =>
+    request(
+      () =>
+        http
+          .put<VersionReadWithContent>(`/document/${documentId}/versions/${versionId}`, { content })
+          .then((r) => r.data),
+      "Failed to save version",
+    ),
 
   getAllVersions: (documentId: number): Promise<VersionRead[]> =>
     request(
@@ -79,15 +89,6 @@ export const api = {
           .post<VersionReadWithContent>(`/document/${documentId}/versions`, { content })
           .then((r) => r.data),
       "Failed to create version",
-    ),
-
-  activateVersion: (documentId: number, versionId: number): Promise<DocumentRead> =>
-    request(
-      () =>
-        http
-          .put<DocumentRead>(`/document/${documentId}/versions/${versionId}/activate`)
-          .then((r) => r.data),
-      "Failed to activate version",
     ),
 
   aiEdit: (
