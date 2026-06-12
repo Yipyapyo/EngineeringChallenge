@@ -79,6 +79,15 @@ Good luck!
 
 **Task 2 Option A — AI-powered editing:** Added a chat panel for natural-language editing instructions (including drag-and-drop `.txt` context). AI suggestions are staged for review—users apply or discard before changes land in the editor. Each document version keeps its own chat history and pending AI edits; switching versions restores the correct sidebar state. The save button indicates when the editor content differs from the last saved state for the active version.
 
+**Developer tooling:** Added a root `Makefile` for common workflows:
+
+| Command | Description |
+|---------|-------------|
+| `make local-setup` | Install client npm dependencies and create a server `.venv` with `uv` |
+| `make build` | Build Docker images |
+| `make dev` | Run the application via Docker Compose |
+| `make test` | Run backend unit tests with pytest |
+
 ## Future Development
 
 ### Option B: Live Collaboration
